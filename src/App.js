@@ -39,7 +39,7 @@ const formatDateObj = (date) => {
   return formatDate(date.getFullYear(), date.getMonth(), date.getDate());
 };
 
-// 判斷是否為需要排班的日子 (保留作為基礎檢驗用)
+// 判斷是否為需要排班的日子
 const isValidDutyDay = (dateStr) => {
   if (CNY_DATES.includes(dateStr)) return false;
   if (SUNDAY_DUTY_DATES.includes(dateStr)) return true;
@@ -137,6 +137,7 @@ export default function DutyScheduler() {
   const generateSchedule = () => {
     const { numPeople, startDate, duration, startRegular, startSunday } = config;
     
+    // 初始化人員狀態，加入 monthlyCounts 以追蹤單月排班總數
     let peopleStats = Array.from({ length: numPeople }, (_, i) => ({
       id: i + 1,
       name: peopleNames[i]?.trim() || `人員 ${i + 1}`,
@@ -145,7 +146,9 @@ export default function DutyScheduler() {
       lastRegularDuty: null,
       lastSundayDuty: null,
       regularDates: [],
-      sundayDates: []
+      sundayDates: [],
+      interruptedLwCount: 0,
+      monthlyCounts: {} // 新增：紀錄每個月被分配的總排班次數
     }));
 
     let regularQueue = [];
@@ -162,10 +165,10 @@ export default function DutyScheduler() {
     let generatedScheduleMap = {};
     let currentBlockWorkers = new Map(); 
     let lastDutyDateObj = null; 
-    let lastDayWorkers = new Set(); // 新增：紀錄上一個排班日的工作人員，防止跨週連續上班
+    let lastDayWorkers = new Set(); 
 
-    // 更新選人演算法：加入跨排班日防呆機制
-    const pickPerson = (queue, pointKey, blockWorkers, stats, previousDayWorkers) => {
+    // 更新選人演算法：加入單月排班次數限制機制
+    const pickPerson = (queue, pointKey, blockWorkers, stats, previousDayWorkers, earnedPoints, currentMonthKey) => {
       // 1. 嚴格篩選：不在本次連假出勤過，且「不是上一個排班日」出勤的人 (防止跨週連上)
       let eligibleIds = queue.filter(id => !blockWorkers.has(id) && !previousDayWorkers.has(id));
 
@@ -179,19 +182,43 @@ export default function DutyScheduler() {
         eligibleIds = queue; 
       }
 
+      // 2. 針對 +2 分的日子：強制優先挑選「累積 +2 分次數」最少的人
+      if (earnedPoints === 2) {
+        const minInterruptedCount = Math.min(...eligibleIds.map(id => stats.find(p => p.id === id).interruptedLwCount));
+        eligibleIds = eligibleIds.filter(id => stats.find(p => p.id === id).interruptedLwCount === minInterruptedCount);
+      }
+
+      // 3. 針對「同一個月內不要值到二次以上」的軟限制 (單月排班平均化)
+      // 優先找出這個月排班次數 < 2 的人
+      let underCapIds = eligibleIds.filter(id => (stats.find(p => p.id === id).monthlyCounts[currentMonthKey] || 0) < 2);
+      
+      if (underCapIds.length === 0) {
+        // 若因為該月假太多，所有人都已經 >= 2 次，則找出目前「本月次數最少的人」進行強制平均攤平
+        const minMonthShifts = Math.min(...eligibleIds.map(id => stats.find(p => p.id === id).monthlyCounts[currentMonthKey] || 0));
+        underCapIds = eligibleIds.filter(id => (stats.find(p => p.id === id).monthlyCounts[currentMonthKey] || 0) === minMonthShifts);
+      }
+      
+      // 將候選名單縮小至符合單月防呆條件的人
+      eligibleIds = underCapIds;
+
+      // 4. 在剩下的候選人中，找尋積分最低者
       const minPts = Math.min(...eligibleIds.map(id => stats.find(p => p.id === id)[pointKey]));
       const chosenIdx = queue.findIndex(id => eligibleIds.includes(id) && stats.find(p => p.id === id)[pointKey] === minPts);
       
       const chosenId = queue.splice(chosenIdx, 1)[0];
       queue.push(chosenId);
       
-      return stats.find(p => p.id === chosenId);
+      const chosenPerson = stats.find(p => p.id === chosenId);
+      
+      return chosenPerson;
     };
 
     for (let d = new Date(startDateObj); d <= endDate; d.setDate(d.getDate() + 1)) {
       const dateStr = formatDateObj(d);
       const dayOfWeek = d.getDay();
       const isCNY = CNY_DATES.includes(dateStr);
+      // 產生當月專屬的 Key (例如: 2026-10)
+      const currentMonthKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 
       if (isCNY) continue;
 
@@ -211,10 +238,13 @@ export default function DutyScheduler() {
         if (isSunday) {
           const earnedPoints = DUTY_POINTS_MAP[dateStr] || 1;
           
-          // 傳入 lastDayWorkers 進行防呆過濾
-          const chosenPerson = pickPerson(sundayQueue, 'sundayPoints', currentBlockWorkers, peopleStats, lastDayWorkers);
+          // 傳入 currentMonthKey 進行單月次數過濾
+          const chosenPerson = pickPerson(sundayQueue, 'sundayPoints', currentBlockWorkers, peopleStats, lastDayWorkers, earnedPoints, currentMonthKey);
 
           chosenPerson.sundayPoints += earnedPoints;
+          if (earnedPoints === 2) chosenPerson.interruptedLwCount += 1;
+          // 紀錄該人員本月的排班總數 +1
+          chosenPerson.monthlyCounts[currentMonthKey] = (chosenPerson.monthlyCounts[currentMonthKey] || 0) + 1;
           chosenPerson.lastSundayDuty = new Date(d);
           chosenPerson.sundayDates.push(dateStr);
           currentBlockWorkers.set(chosenPerson.id, (currentBlockWorkers.get(chosenPerson.id) || 0) + 1);
@@ -231,21 +261,27 @@ export default function DutyScheduler() {
         } else if (isRegular) {
           const earnedPoints = DUTY_POINTS_MAP[dateStr] || 1;
           
-          // 傳入 lastDayWorkers 進行防呆過濾
-          const chosen1 = pickPerson(regularQueue, 'regularPoints', currentBlockWorkers, peopleStats, lastDayWorkers);
+          // 傳入 currentMonthKey 進行單月次數過濾 (第一人)
+          const chosen1 = pickPerson(regularQueue, 'regularPoints', currentBlockWorkers, peopleStats, lastDayWorkers, earnedPoints, currentMonthKey);
           
           chosen1.regularPoints += earnedPoints;
+          if (earnedPoints === 2) chosen1.interruptedLwCount += 1;
+          // 紀錄第一名人員本月的排班總數 +1
+          chosen1.monthlyCounts[currentMonthKey] = (chosen1.monthlyCounts[currentMonthKey] || 0) + 1;
           chosen1.lastRegularDuty = new Date(d);
           chosen1.regularDates.push(dateStr);
           currentBlockWorkers.set(chosen1.id, (currentBlockWorkers.get(chosen1.id) || 0) + 1);
           
           let assignments = [{ id: chosen1.id, name: chosen1.name }];
 
+          // 傳入 currentMonthKey 進行單月次數過濾 (第二人)
           if (peopleStats.length > 1) {
-            // 傳入 lastDayWorkers 進行防呆過濾
-            const chosen2 = pickPerson(regularQueue, 'regularPoints', currentBlockWorkers, peopleStats, lastDayWorkers);
+            const chosen2 = pickPerson(regularQueue, 'regularPoints', currentBlockWorkers, peopleStats, lastDayWorkers, earnedPoints, currentMonthKey);
 
             chosen2.regularPoints += earnedPoints;
+            if (earnedPoints === 2) chosen2.interruptedLwCount += 1;
+            // 紀錄第二名人員本月的排班總數 +1
+            chosen2.monthlyCounts[currentMonthKey] = (chosen2.monthlyCounts[currentMonthKey] || 0) + 1;
             chosen2.lastRegularDuty = new Date(d);
             chosen2.regularDates.push(dateStr);
             currentBlockWorkers.set(chosen2.id, (currentBlockWorkers.get(chosen2.id) || 0) + 1);
@@ -272,7 +308,6 @@ export default function DutyScheduler() {
   const downloadAsImage = async () => {
     setIsDownloading(true);
     try {
-      // 動態載入 html2canvas 套件 (確保在沒有預裝的環境也能運作)
       if (!window.html2canvas) {
         await new Promise((resolve, reject) => {
           const script = document.createElement('script');
@@ -283,18 +318,15 @@ export default function DutyScheduler() {
         });
       }
 
-      // 取得要截圖的區塊元素
       const element = document.getElementById('schedule-capture-area');
       if (!element) return;
 
-      // 執行截圖
       const canvas = await window.html2canvas(element, {
-        scale: 2, // 提高圖片解析度
-        backgroundColor: '#f8fafc', // 對應 Tailwind 的 bg-slate-50
+        scale: 2, 
+        backgroundColor: '#f8fafc',
         useCORS: true,
       });
 
-      // 轉換為圖片連結並觸發下載
       const image = canvas.toDataURL('image/png');
       const link = document.createElement('a');
       link.href = image;
@@ -319,16 +351,14 @@ export default function DutyScheduler() {
       const currentMonthIndex = currentDate.getMonth();
       
       const daysInMonth = new Date(currentYear, currentMonthIndex + 1, 0).getDate();
-      const firstDayOfWeek = new Date(currentYear, currentMonthIndex, 1).getDay(); // 0 = Sun
+      const firstDayOfWeek = new Date(currentYear, currentMonthIndex, 1).getDay(); 
       
       let days = [];
       
-      // 補齊月初前方的空白天數
       for (let i = 0; i < firstDayOfWeek; i++) {
         days.push(null);
       }
       
-      // 填入實際天數
       for (let i = 1; i <= daysInMonth; i++) {
         days.push(new Date(currentYear, currentMonthIndex, i));
       }
@@ -341,7 +371,6 @@ export default function DutyScheduler() {
             </h3>
           </div>
           
-          {/* Calendar Grid Header */}
           <div className="grid grid-cols-7 bg-slate-100 border-b border-slate-200">
             {WEEKDAYS.map((day, idx) => (
               <div key={day} className={`text-center py-2 text-sm font-bold ${idx === 0 || idx === 6 ? 'text-red-500' : 'text-slate-600'}`}>
@@ -350,7 +379,6 @@ export default function DutyScheduler() {
             ))}
           </div>
 
-          {/* Calendar Grid Body */}
           <div className="grid grid-cols-7 gap-px bg-slate-200">
             {days.map((dateObj, idx) => {
               if (!dateObj) {
@@ -366,10 +394,10 @@ export default function DutyScheduler() {
               let textClass = "text-slate-700 font-medium";
               
               if (dayOfWeek === 0) {
-                cellClass = "bg-slate-50 min-h-[110px] p-2 flex flex-col"; // 週日反灰
+                cellClass = "bg-slate-50 min-h-[110px] p-2 flex flex-col"; 
                 textClass = "text-red-500 font-bold";
               } else if (isCNY) {
-                cellClass = "bg-red-50 min-h-[110px] p-2 flex flex-col border-red-100"; // 春節特殊底色
+                cellClass = "bg-red-50 min-h-[110px] p-2 flex flex-col border-red-100"; 
                 textClass = "text-red-500 font-bold";
               }
 
@@ -380,8 +408,6 @@ export default function DutyScheduler() {
                     {isCNY && <span className="text-[10px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded font-bold">春節</span>}
                   </div>
                   
-                  {}
-                  {/* 排班資訊顯示 */}
                   <div className="flex-1 flex flex-col justify-end pb-1">
                     {dutyInfo && (
                       <div className={`mt-1 flex flex-col items-center justify-center p-1.5 rounded-lg border ${
@@ -430,7 +456,6 @@ export default function DutyScheduler() {
     return calendars;
   };
 
-  // 新增表格檢視模式的渲染函數
   const renderTableView = () => {
     const { startDate, duration } = config;
     const [sYear, sMonth] = startDate.split('-').map(Number);
@@ -480,7 +505,6 @@ export default function DutyScheduler() {
                   let dateTextClass = "text-slate-700";
                   let dayTypeLabel = "";
 
-                  // 依照放假類型給予不同底色與標示
                   if (isCNY) {
                     rowClass = "bg-red-50 border-b border-red-100 hover:bg-red-100";
                     dateTextClass = "text-red-600 font-bold";
@@ -545,7 +569,6 @@ export default function DutyScheduler() {
     <div className="min-h-screen bg-slate-50 p-4 md:p-8 text-slate-800 font-sans">
       <div className="max-w-6xl mx-auto space-y-6">
         
-        {/* Header */}
         <div className="flex items-center space-x-3 mb-8">
           <div className="bg-blue-600 p-2 rounded-lg">
             <CalendarIcon className="w-6 h-6 text-white" />
@@ -553,7 +576,6 @@ export default function DutyScheduler() {
           <h1 className="text-3xl font-bold text-slate-900 tracking-tight">週末與國定假日排班系統</h1>
         </div>
 
-        {/* Configuration Card */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
           <div className="flex items-center space-x-2 mb-4 border-b border-slate-100 pb-3">
             <Settings className="w-5 h-5 text-slate-500" />
@@ -647,7 +669,6 @@ export default function DutyScheduler() {
             </div>
           </div>
 
-          {/* 人員名稱設定 */}
           <div className="mt-6 border-t border-slate-100 pt-4">
             <label className="text-sm font-medium text-slate-600 mb-3 flex items-center">
               <Users className="w-4 h-4 mr-1" /> 自訂人員名稱 (若留空則使用預設名稱)
@@ -671,7 +692,8 @@ export default function DutyScheduler() {
               <p className="flex items-center text-red-600 font-medium"><CheckCircle2 className="w-4 h-4 mr-2" />嚴格排除：農曆春節期間</p>
               <p className="flex items-center text-blue-600 font-medium"><CheckCircle2 className="w-4 h-4 mr-2" />常規排班：週六、連假與國定假日 (2人)</p>
               <p className="flex items-center text-emerald-600 font-medium"><CheckCircle2 className="w-4 h-4 mr-2" />週日排班：所有非春節週日 (獨立計算)</p>
-              <p className="flex items-center text-purple-600 font-medium"><CheckCircle2 className="w-4 h-4 mr-2" />過勞防呆：相鄰排班日強制不重複，避免跨週連續上班</p>
+              <p className="flex items-center text-purple-600 font-medium"><CheckCircle2 className="w-4 h-4 mr-2" />相鄰防呆：相鄰排班日強制不重複，並優先將中斷連假(+2分)平均分配</p>
+              <p className="flex items-center text-amber-600 font-medium"><CheckCircle2 className="w-4 h-4 mr-2" />單月防呆：強制將同月班次平均攤平，避免單月集中排班過多次</p>
             </div>
             <button 
               onClick={generateSchedule}
@@ -682,11 +704,9 @@ export default function DutyScheduler() {
           </div>
         </div>
 
-        {/* Output Section */}
         {hasGenerated && (
           <div className="mt-8 space-y-4">
             
-            {/* Action Bar (下載按鈕) */}
             <div className="flex justify-end mb-2">
               <button 
                 onClick={downloadAsImage} 
@@ -702,16 +722,12 @@ export default function DutyScheduler() {
               </button>
             </div>
 
-            {/* 截圖範圍 (Capture Area) */}
             <div id="schedule-capture-area" className="flex flex-col space-y-8 bg-slate-50 p-2 sm:p-6 rounded-xl border border-slate-100">
               
-              {/* View Switching (Calendar or Table) */}
               <div className="w-full">
                 {config.viewMode === 'table' ? renderTableView() : renderCalendars()}
               </div>
 
-              {}
-              {/* Stats Section (Bottom Full Width) */}
               <div className="w-full bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
                 <div className="bg-slate-50 border-b border-slate-200 p-4">
                   <h2 className="text-lg font-bold flex items-center text-slate-800">
@@ -722,26 +738,29 @@ export default function DutyScheduler() {
                 <div className="p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                   {stats.map(person => (
                     <div key={person.id} className="bg-white rounded-xl border border-slate-100 p-4 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden flex flex-col justify-between">
-                      <div className="flex items-center space-x-2 mb-3 pb-2 border-b border-slate-100">
-                        <div className="w-8 h-8 rounded-full bg-slate-800 text-white flex items-center justify-center font-bold text-sm">
+                      <div className="flex items-center space-x-2 mb-2 pb-3 border-b border-slate-100">
+                        <div className="w-8 h-8 rounded-full bg-slate-800 text-white flex items-center justify-center font-bold text-sm shrink-0">
                           {person.id}
                         </div>
-                        <span className="font-bold text-slate-700 text-sm">{person.name}</span>
+                        <div className="flex flex-col">
+                          <span className="font-bold text-slate-700 text-sm">{person.name}</span>
+                          {/* 針對 +2 分天數的精準標記 */}
+                          <span className="text-[11px] font-bold text-red-500 bg-red-50 border border-red-100 px-1.5 py-0.5 rounded-sm mt-0.5 inline-block">
+                            中斷連假 (+2分): {person.interruptedLwCount} 次
+                          </span>
+                        </div>
                       </div>
                       
-                      {/* Bar Charts Container */}
-                      <div className="flex justify-around items-end pt-1 min-h-[160px]">
+                      <div className="flex justify-around items-end pt-2 min-h-[160px]">
                         
-                        {/* Regular Points Bar */}
                         <div className="flex flex-col items-center justify-end w-1/2 px-1">
                           <div className="text-xl font-black text-blue-600 mb-2 leading-none">{person.regularPoints}</div>
                           <div className="w-full flex flex-col items-center justify-end">
-                            {/* 反轉陣列讓日期由下而上堆疊 */}
                             {person.regularDates.slice().reverse().map((dateStr, idx) => {
                               const pts = DUTY_POINTS_MAP[dateStr] || 1;
-                              const baseH = 28; // 1分的高度 (px)
-                              const gap = 4; // mb-1 的間距 (px)
-                              const height = pts === 2 ? (baseH * 2 + gap) : baseH; // 2分的格子高度為兩倍加上間距
+                              const baseH = 28; 
+                              const gap = 4; 
+                              const height = pts === 2 ? (baseH * 2 + gap) : baseH; 
                               return (
                                 <div key={`reg-${idx}`} 
                                      className="w-full max-w-[80px] bg-blue-50 border border-blue-200 text-blue-700 flex flex-col items-center justify-center rounded-md shadow-sm hover:bg-blue-100 transition-colors mb-1"
@@ -755,10 +774,8 @@ export default function DutyScheduler() {
                           <div className="text-xs font-bold text-slate-500 mt-3 bg-slate-50 px-2 py-0.5 rounded">常規</div>
                         </div>
 
-                        {/* Divider */}
                         <div className="w-px bg-slate-200 self-stretch mx-1"></div>
 
-                        {/* Sunday Points Bar */}
                         <div className="flex flex-col items-center justify-end w-1/2 px-1">
                           <div className="text-xl font-black text-emerald-600 mb-2 leading-none">{person.sundayPoints}</div>
                           <div className="w-full flex flex-col items-center justify-end">
