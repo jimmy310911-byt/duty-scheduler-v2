@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Calendar as CalendarIcon, Users, Settings, AlertCircle, BarChart3, CheckCircle2, ChevronRight, ChevronLeft, Table as TableIcon, Download, Loader2 } from 'lucide-react';
+import { Calendar as CalendarIcon, Users, Settings, AlertCircle, BarChart3, CheckCircle2, ChevronRight, ChevronLeft, Table as TableIcon, Download, Loader2, FileSpreadsheet } from 'lucide-react';
 
 // 根據使用者提供的明確日期，定義農曆過年期間 (不排班)
 const CNY_DATES = [
@@ -25,10 +25,8 @@ const REGULAR_DUTY_DATES = [
   '2027-01-01', '2027-01-02', '2027-01-09', '2027-01-16', '2027-01-23', '2027-01-30', '2027-02-13', '2027-02-20', '2027-02-27', '2027-03-01', '2027-03-06', '2027-03-13', '2027-03-20', '2027-03-27', '2027-04-03', '2027-04-05', '2027-04-06', '2027-04-10', '2027-04-17', '2027-04-24', '2027-04-30', '2027-05-01', '2027-05-08', '2027-05-15', '2027-05-22', '2027-05-29', '2027-06-05', '2027-06-09', '2027-06-12', '2027-06-19', '2027-06-26', '2027-07-03', '2027-07-10', '2027-07-17', '2027-07-24', '2027-07-31', '2027-08-07', '2027-08-14', '2027-08-21', '2027-08-28', '2027-09-04', '2027-09-11', '2027-09-15', '2027-09-18', '2027-09-25', '2027-09-28', '2027-10-02', '2027-10-09', '2027-10-11', '2027-10-16', '2027-10-23', '2027-10-25', '2027-10-30', '2027-11-06', '2027-11-13', '2027-11-20', '2027-11-27', '2027-12-04', '2027-12-11', '2027-12-18', '2027-12-24', '2027-12-25', '2027-12-31'
 ];
 
-// 星期對應表
 const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六'];
 
-// 格式化日期為 YYYY-MM-DD
 const formatDate = (year, month, day) => {
   const m = String(month + 1).padStart(2, '0');
   const d = String(day).padStart(2, '0');
@@ -39,108 +37,120 @@ const formatDateObj = (date) => {
   return formatDate(date.getFullYear(), date.getMonth(), date.getDate());
 };
 
-// 判斷是否為需要排班的日子
-const isValidDutyDay = (dateStr) => {
-  if (CNY_DATES.includes(dateStr)) return false;
-  if (SUNDAY_DUTY_DATES.includes(dateStr)) return true;
-  if (REGULAR_DUTY_DATES.includes(dateStr)) return true;
-  return false;
-};
-
 // 計算連續假期的特殊積分 (連假中間日給予 2 分補償)
 const ALL_DUTY_DATES = [...new Set([...SUNDAY_DUTY_DATES, ...REGULAR_DUTY_DATES])].sort((a, b) => new Date(a) - new Date(b));
-const DUTY_POINTS_MAP = {};
-let currentBlock = [];
-
-for (let i = 0; i < ALL_DUTY_DATES.length; i++) {
-  const current = ALL_DUTY_DATES[i];
-  currentBlock.push(current);
-
-  const next = ALL_DUTY_DATES[i + 1];
-  let isConsecutive = false;
-  if (next) {
-     const currDate = new Date(current);
-     const nextDate = new Date(next);
-     const diffDays = Math.round((nextDate - currDate) / (1000 * 60 * 60 * 24));
-     if (diffDays === 1) isConsecutive = true;
-  }
-
-  if (!isConsecutive) {
-     // 如果連續放假 3 天(含)以上，扣除首尾，中間的日子皆為 2 分
-     if (currentBlock.length >= 3) {
-        DUTY_POINTS_MAP[currentBlock[0]] = 1;
-        DUTY_POINTS_MAP[currentBlock[currentBlock.length - 1]] = 1;
-        for (let j = 1; j < currentBlock.length - 1; j++) {
-           DUTY_POINTS_MAP[currentBlock[j]] = 2;
-        }
-     } else {
-        // 一般週末 2 天或單一假日皆為 1 分
-        for (let j = 0; j < currentBlock.length; j++) {
-           DUTY_POINTS_MAP[currentBlock[j]] = 1;
-        }
-     }
-     currentBlock = [];
-  }
-}
 
 export default function DutyScheduler() {
   const [config, setConfig] = useState({
-    numPeople: 5,
+    numPeople: 6, // 預設 6 人，方便分 3A 3B
     startDate: '2026-10-01', 
     duration: 3, 
     viewMode: 'calendar',
-    startRegular: 1, 
-    startSunday: 4   
+    startRegularA: 1, 
+    startRegularB: 2, 
+    startSunday: 1,
+    edgePoints: 2,   // 連假頭尾積分
+    middlePoints: 3  // 中斷連假積分
   });
-  const [peopleNames, setPeopleNames] = useState(Array(5).fill('')); 
+  
+  // 動態運算排班點數地圖 (獨立記錄 dates 結構屬性，不再依賴 points 值反推)
+  const dutyMetaMap = useMemo(() => {
+    const map = {};
+    let currentBlock = [];
+    
+    for (let i = 0; i < ALL_DUTY_DATES.length; i++) {
+      const current = ALL_DUTY_DATES[i];
+      currentBlock.push(current);
+
+      const next = ALL_DUTY_DATES[i + 1];
+      let isConsecutive = false;
+      if (next) {
+         const currDate = new Date(current);
+         const nextDate = new Date(next);
+         const diffDays = Math.round((nextDate - currDate) / (1000 * 60 * 60 * 24));
+         if (diffDays === 1) isConsecutive = true;
+      }
+
+      if (!isConsecutive) {
+         // 如果連續放假 3 天(含)以上，套用自訂的頭尾與中斷積分，並獨立標記 isMiddle
+         if (currentBlock.length >= 3) {
+            map[currentBlock[0]] = { points: config.edgePoints, isEdge: true, isMiddle: false };
+            map[currentBlock[currentBlock.length - 1]] = { points: config.edgePoints, isEdge: true, isMiddle: false };
+            for (let j = 1; j < currentBlock.length - 1; j++) {
+               map[currentBlock[j]] = { points: config.middlePoints, isEdge: false, isMiddle: true };
+            }
+         } else {
+            // 一般週末 2 天或單一假日皆為 1 分
+            for (let j = 0; j < currentBlock.length; j++) {
+               map[currentBlock[j]] = { points: 1, isEdge: false, isMiddle: false };
+            }
+         }
+         currentBlock = [];
+      }
+    }
+    return map;
+  }, [config.edgePoints, config.middlePoints]);
+
+  // 使用物件陣列同時儲存姓名與 A/B 工區群組
+  const [peopleConfig, setPeopleConfig] = useState(
+    Array(6).fill(null).map((_, i) => ({
+      name: '',
+      group: i % 2 === 0 ? 'A' : 'B'
+    }))
+  ); 
 
   const [scheduleMap, setScheduleMap] = useState({});
   const [stats, setStats] = useState([]);
   const [hasGenerated, setHasGenerated] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isDownloadingExcel, setIsDownloadingExcel] = useState(false);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
     let parsedValue = value;
 
-    if (['numPeople', 'duration', 'startRegular', 'startSunday'].includes(name)) {
+    if (['numPeople', 'duration', 'startRegularA', 'startRegularB', 'startSunday', 'edgePoints', 'middlePoints'].includes(name)) {
       parsedValue = parseInt(value, 10) || 1;
     }
 
     setConfig(prev => {
       let nextConfig = { ...prev, [name]: parsedValue };
-      // 防呆：如果總人數減少，確保起始人員 ID 不會超過總人數
       if (name === 'numPeople') {
-        if (nextConfig.startRegular > parsedValue) nextConfig.startRegular = 1;
+        if (nextConfig.startRegularA > parsedValue) nextConfig.startRegularA = 1;
+        if (nextConfig.startRegularB > parsedValue) nextConfig.startRegularB = 1;
         if (nextConfig.startSunday > parsedValue) nextConfig.startSunday = 1;
       }
       return nextConfig;
     });
 
     if (name === 'numPeople') {
-      setPeopleNames(prev => {
-        const newNames = [...prev];
+      setPeopleConfig(prev => {
+        const newConfig = [...prev];
         if (parsedValue > prev.length) {
-          return [...newNames, ...Array(parsedValue - prev.length).fill('')];
+          const additions = Array(parsedValue - prev.length).fill(null).map((_, idx) => ({
+             name: '',
+             group: (prev.length + idx) % 2 === 0 ? 'A' : 'B'
+          }));
+          return [...newConfig, ...additions];
         }
-        return newNames.slice(0, parsedValue);
+        return newConfig.slice(0, parsedValue);
       });
     }
   };
 
-  const handleNameChange = (index, value) => {
-    const newNames = [...peopleNames];
-    newNames[index] = value;
-    setPeopleNames(newNames);
+  const handlePersonChange = (index, field, value) => {
+    const newConfig = [...peopleConfig];
+    newConfig[index] = { ...newConfig[index], [field]: value };
+    setPeopleConfig(newConfig);
   };
 
   const generateSchedule = () => {
-    const { numPeople, startDate, duration, startRegular, startSunday } = config;
+    const { numPeople, startDate, duration, startRegularA, startRegularB, startSunday } = config;
     
-    // 初始化人員狀態，加入 monthlyCounts 以追蹤單月排班總數
     let peopleStats = Array.from({ length: numPeople }, (_, i) => ({
       id: i + 1,
-      name: peopleNames[i]?.trim() || `人員 ${i + 1}`,
+      name: peopleConfig[i]?.name?.trim() || `人員 ${i + 1}`,
+      group: peopleConfig[i]?.group || 'A',
       regularPoints: 0,
       sundayPoints: 0,
       lastRegularDuty: null,
@@ -148,14 +158,28 @@ export default function DutyScheduler() {
       regularDates: [],
       sundayDates: [],
       interruptedLwCount: 0,
-      monthlyCounts: {} // 新增：紀錄每個月被分配的總排班次數
+      monthlyCounts: {} 
     }));
 
-    let regularQueue = [];
     let sundayQueue = [];
     for (let i = 0; i < numPeople; i++) {
-      regularQueue.push(((startRegular - 1 + i) % numPeople) + 1);
       sundayQueue.push(((startSunday - 1 + i) % numPeople) + 1);
+    }
+
+    // 準備 A, B 兩組的獨立序列
+    let groupAIds = peopleStats.filter(p => p.group === 'A').map(p => p.id);
+    let groupBIds = peopleStats.filter(p => p.group === 'B').map(p => p.id);
+
+    // 依照指定的起始人員調整 Queue 的順序
+    let regularQueueA = [...groupAIds];
+    if (groupAIds.includes(startRegularA)) {
+       const idx = groupAIds.indexOf(startRegularA);
+       regularQueueA = [...groupAIds.slice(idx), ...groupAIds.slice(0, idx)];
+    }
+    let regularQueueB = [...groupBIds];
+    if (groupBIds.includes(startRegularB)) {
+       const idx = groupBIds.indexOf(startRegularB);
+       regularQueueB = [...groupBIds.slice(idx), ...groupBIds.slice(0, idx)];
     }
 
     const [sYear, sMonth, sDay] = startDate.split('-').map(Number);
@@ -167,8 +191,10 @@ export default function DutyScheduler() {
     let lastDutyDateObj = null; 
     let lastDayWorkers = new Set(); 
 
-    // 更新選人演算法：加入單月排班次數限制機制
-    const pickPerson = (queue, pointKey, blockWorkers, stats, previousDayWorkers, earnedPoints, currentMonthKey) => {
+    // 選人演算法：加入防呆機制與特殊假日優先分配
+    const pickPerson = (queue, pointKey, blockWorkers, stats, previousDayWorkers, isMiddle, currentMonthKey) => {
+      if (!queue || queue.length === 0) return null;
+
       // 1. 嚴格篩選：不在本次連假出勤過，且「不是上一個排班日」出勤的人 (防止跨週連上)
       let eligibleIds = queue.filter(id => !blockWorkers.has(id) && !previousDayWorkers.has(id));
 
@@ -182,23 +208,20 @@ export default function DutyScheduler() {
         eligibleIds = queue; 
       }
 
-      // 2. 針對 +2 分的日子：強制優先挑選「累積 +2 分次數」最少的人
-      if (earnedPoints === 2) {
+      // 2. 針對高積分(中斷連假)的日子：根據結構上的 isMiddle 進行判斷，不受分數高低影響
+      if (isMiddle) {
         const minInterruptedCount = Math.min(...eligibleIds.map(id => stats.find(p => p.id === id).interruptedLwCount));
         eligibleIds = eligibleIds.filter(id => stats.find(p => p.id === id).interruptedLwCount === minInterruptedCount);
       }
 
       // 3. 針對「同一個月內不要值到二次以上」的軟限制 (單月排班平均化)
-      // 優先找出這個月排班次數 < 2 的人
       let underCapIds = eligibleIds.filter(id => (stats.find(p => p.id === id).monthlyCounts[currentMonthKey] || 0) < 2);
       
       if (underCapIds.length === 0) {
-        // 若因為該月假太多，所有人都已經 >= 2 次，則找出目前「本月次數最少的人」進行強制平均攤平
         const minMonthShifts = Math.min(...eligibleIds.map(id => stats.find(p => p.id === id).monthlyCounts[currentMonthKey] || 0));
         underCapIds = eligibleIds.filter(id => (stats.find(p => p.id === id).monthlyCounts[currentMonthKey] || 0) === minMonthShifts);
       }
       
-      // 將候選名單縮小至符合單月防呆條件的人
       eligibleIds = underCapIds;
 
       // 4. 在剩下的候選人中，找尋積分最低者
@@ -208,16 +231,13 @@ export default function DutyScheduler() {
       const chosenId = queue.splice(chosenIdx, 1)[0];
       queue.push(chosenId);
       
-      const chosenPerson = stats.find(p => p.id === chosenId);
-      
-      return chosenPerson;
+      return stats.find(p => p.id === chosenId);
     };
 
     for (let d = new Date(startDateObj); d <= endDate; d.setDate(d.getDate() + 1)) {
       const dateStr = formatDateObj(d);
       const dayOfWeek = d.getDay();
       const isCNY = CNY_DATES.includes(dateStr);
-      // 產生當月專屬的 Key (例如: 2026-10)
       const currentMonthKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 
       if (isCNY) continue;
@@ -236,65 +256,75 @@ export default function DutyScheduler() {
         lastDutyDateObj = new Date(d);
 
         if (isSunday) {
-          const earnedPoints = DUTY_POINTS_MAP[dateStr] || 1;
-          
-          // 傳入 currentMonthKey 進行單月次數過濾
-          const chosenPerson = pickPerson(sundayQueue, 'sundayPoints', currentBlockWorkers, peopleStats, lastDayWorkers, earnedPoints, currentMonthKey);
+          const dutyMeta = dutyMetaMap[dateStr] || { points: 1, isMiddle: false, isEdge: false };
+          const earnedPoints = dutyMeta.points;
+          const isMiddle = dutyMeta.isMiddle;
+          const isEdge = dutyMeta.isEdge;
 
-          chosenPerson.sundayPoints += earnedPoints;
-          if (earnedPoints === 2) chosenPerson.interruptedLwCount += 1;
-          // 紀錄該人員本月的排班總數 +1
-          chosenPerson.monthlyCounts[currentMonthKey] = (chosenPerson.monthlyCounts[currentMonthKey] || 0) + 1;
-          chosenPerson.lastSundayDuty = new Date(d);
-          chosenPerson.sundayDates.push(dateStr);
-          currentBlockWorkers.set(chosenPerson.id, (currentBlockWorkers.get(chosenPerson.id) || 0) + 1);
-          
-          generatedScheduleMap[dateStr] = {
-            assignments: [{ id: chosenPerson.id, name: chosenPerson.name }],
-            type: 'sunday',
-            earnedPoints: earnedPoints
-          };
-          
-          // 更新上一排班日的人員名單
-          lastDayWorkers = new Set([chosenPerson.id]);
-          
+          const chosenPerson = pickPerson(sundayQueue, 'sundayPoints', currentBlockWorkers, peopleStats, lastDayWorkers, isMiddle, currentMonthKey);
+
+          if (chosenPerson) {
+              chosenPerson.sundayPoints += earnedPoints;
+              if (isMiddle) chosenPerson.interruptedLwCount += 1;
+              chosenPerson.monthlyCounts[currentMonthKey] = (chosenPerson.monthlyCounts[currentMonthKey] || 0) + 1;
+              chosenPerson.lastSundayDuty = new Date(d);
+              chosenPerson.sundayDates.push(dateStr);
+              currentBlockWorkers.set(chosenPerson.id, (currentBlockWorkers.get(chosenPerson.id) || 0) + 1);
+              
+              generatedScheduleMap[dateStr] = {
+                assignments: [{ id: chosenPerson.id, name: chosenPerson.name, group: chosenPerson.group }],
+                type: 'sunday',
+                earnedPoints: earnedPoints,
+                isMiddle: isMiddle,
+                isEdge: isEdge
+              };
+              
+              lastDayWorkers = new Set([chosenPerson.id]);
+          }
         } else if (isRegular) {
-          const earnedPoints = DUTY_POINTS_MAP[dateStr] || 1;
-          
-          // 傳入 currentMonthKey 進行單月次數過濾 (第一人)
-          const chosen1 = pickPerson(regularQueue, 'regularPoints', currentBlockWorkers, peopleStats, lastDayWorkers, earnedPoints, currentMonthKey);
-          
-          chosen1.regularPoints += earnedPoints;
-          if (earnedPoints === 2) chosen1.interruptedLwCount += 1;
-          // 紀錄第一名人員本月的排班總數 +1
-          chosen1.monthlyCounts[currentMonthKey] = (chosen1.monthlyCounts[currentMonthKey] || 0) + 1;
-          chosen1.lastRegularDuty = new Date(d);
-          chosen1.regularDates.push(dateStr);
-          currentBlockWorkers.set(chosen1.id, (currentBlockWorkers.get(chosen1.id) || 0) + 1);
-          
-          let assignments = [{ id: chosen1.id, name: chosen1.name }];
+          const dutyMeta = dutyMetaMap[dateStr] || { points: 1, isMiddle: false, isEdge: false };
+          const earnedPoints = dutyMeta.points;
+          const isMiddle = dutyMeta.isMiddle;
+          const isEdge = dutyMeta.isEdge;
 
-          // 傳入 currentMonthKey 進行單月次數過濾 (第二人)
-          if (peopleStats.length > 1) {
-            const chosen2 = pickPerson(regularQueue, 'regularPoints', currentBlockWorkers, peopleStats, lastDayWorkers, earnedPoints, currentMonthKey);
+          let assignments = [];
+          
+          // 挑選 A 區負責人
+          if (regularQueueA.length > 0) {
+            const chosenA = pickPerson(regularQueueA, 'regularPoints', currentBlockWorkers, peopleStats, lastDayWorkers, isMiddle, currentMonthKey);
+            if (chosenA) {
+                chosenA.regularPoints += earnedPoints;
+                if (isMiddle) chosenA.interruptedLwCount += 1;
+                chosenA.monthlyCounts[currentMonthKey] = (chosenA.monthlyCounts[currentMonthKey] || 0) + 1;
+                chosenA.lastRegularDuty = new Date(d);
+                chosenA.regularDates.push(dateStr);
+                currentBlockWorkers.set(chosenA.id, (currentBlockWorkers.get(chosenA.id) || 0) + 1);
+                assignments.push({ id: chosenA.id, name: chosenA.name, group: 'A' });
+            }
+          }
 
-            chosen2.regularPoints += earnedPoints;
-            if (earnedPoints === 2) chosen2.interruptedLwCount += 1;
-            // 紀錄第二名人員本月的排班總數 +1
-            chosen2.monthlyCounts[currentMonthKey] = (chosen2.monthlyCounts[currentMonthKey] || 0) + 1;
-            chosen2.lastRegularDuty = new Date(d);
-            chosen2.regularDates.push(dateStr);
-            currentBlockWorkers.set(chosen2.id, (currentBlockWorkers.get(chosen2.id) || 0) + 1);
-            assignments.push({ id: chosen2.id, name: chosen2.name });
+          // 挑選 B 區負責人
+          if (regularQueueB.length > 0) {
+            const chosenB = pickPerson(regularQueueB, 'regularPoints', currentBlockWorkers, peopleStats, lastDayWorkers, isMiddle, currentMonthKey);
+            if (chosenB) {
+                chosenB.regularPoints += earnedPoints;
+                if (isMiddle) chosenB.interruptedLwCount += 1;
+                chosenB.monthlyCounts[currentMonthKey] = (chosenB.monthlyCounts[currentMonthKey] || 0) + 1;
+                chosenB.lastRegularDuty = new Date(d);
+                chosenB.regularDates.push(dateStr);
+                currentBlockWorkers.set(chosenB.id, (currentBlockWorkers.get(chosenB.id) || 0) + 1);
+                assignments.push({ id: chosenB.id, name: chosenB.name, group: 'B' });
+            }
           }
           
           generatedScheduleMap[dateStr] = {
             assignments: assignments,
             type: isRegular && dayOfWeek !== 6 ? 'holiday' : 'regular',
-            earnedPoints: earnedPoints
+            earnedPoints: earnedPoints,
+            isMiddle: isMiddle,
+            isEdge: isEdge
           };
           
-          // 更新上一排班日的人員名單
           lastDayWorkers = new Set(assignments.map(a => a.id));
         }
       }
@@ -337,6 +367,128 @@ export default function DutyScheduler() {
       console.error("下載圖片失敗:", error);
     } finally {
       setIsDownloading(false);
+    }
+  };
+
+  const downloadAsExcel = async () => {
+    setIsDownloadingExcel(true);
+    try {
+      if (!window.XLSX) {
+        await new Promise((resolve, reject) => {
+          const script = document.createElement('script');
+          script.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+          script.onload = resolve;
+          script.onerror = reject;
+          document.head.appendChild(script);
+        });
+      }
+
+      const wb = window.XLSX.utils.book_new();
+
+      // 第一分頁：積分總覽與統計
+      const summaryData = [
+        ["累積積分總覽表"],
+        ["人員", "組別", "常規班積分", "週日班積分", "總積分", `中斷連假 (+${config.middlePoints}分) 次數`]
+      ];
+      stats.forEach(p => {
+        summaryData.push([
+          p.name,
+          p.group,
+          p.regularPoints,
+          p.sundayPoints,
+          p.regularPoints + p.sundayPoints,
+          p.interruptedLwCount
+        ]);
+      });
+      
+      // 在 Excel 中留一些空行，再附上特殊加分明細(等同柱狀圖細節)
+      summaryData.push([]);
+      summaryData.push(["各人員特殊加分明細 (排班日紀錄)"]);
+      stats.forEach(p => {
+        summaryData.push([`【${p.name}】 常規班特殊積分日:`]);
+        const regDetails = p.regularDates
+          .map(d => ({ date: d, meta: dutyMetaMap[d] }))
+          .filter(item => item.meta && item.meta.points > 1)
+          .map(item => `${item.date} (+${item.meta.points}分)`);
+        summaryData.push(regDetails.length > 0 ? regDetails : ["無"]);
+        
+        summaryData.push([`【${p.name}】 週日班特殊積分日:`]);
+        const sunDetails = p.sundayDates
+          .map(d => ({ date: d, meta: dutyMetaMap[d] }))
+          .filter(item => item.meta && item.meta.points > 1)
+          .map(item => `${item.date} (+${item.meta.points}分)`);
+        summaryData.push(sunDetails.length > 0 ? sunDetails : ["無"]);
+        summaryData.push([]);
+      });
+
+      const summarySheet = window.XLSX.utils.aoa_to_sheet(summaryData);
+      
+      // 調整首頁欄寬
+      summarySheet['!cols'] = [{wch: 20}, {wch: 10}, {wch: 15}, {wch: 15}, {wch: 10}, {wch: 25}];
+      window.XLSX.utils.book_append_sheet(wb, summarySheet, "積分總覽");
+
+      // 分頁：各月份排班表
+      const { startDate, duration } = config;
+      const [sYear, sMonth] = startDate.split('-').map(Number);
+      let currentDate = new Date(sYear, sMonth - 1, 1);
+
+      for (let m = 0; m < duration; m++) {
+        const currentYear = currentDate.getFullYear();
+        const currentMonthIndex = currentDate.getMonth();
+        const daysInMonth = new Date(currentYear, currentMonthIndex + 1, 0).getDate();
+
+        const monthData = [
+          [`${currentYear}年${currentMonthIndex + 1}月 排班表`],
+          ["日期", ...stats.map(p => `${p.name} (${p.group}區)`)]
+        ];
+
+        for (let i = 1; i <= daysInMonth; i++) {
+          const dateObj = new Date(currentYear, currentMonthIndex, i);
+          const dateStr = formatDateObj(dateObj);
+          const dayOfWeek = dateObj.getDay();
+          const dutyInfo = scheduleMap[dateStr];
+          const isCNY = CNY_DATES.includes(dateStr);
+
+          let dayLabel = "";
+          if (isCNY) dayLabel = " (春節)";
+          else if (SUNDAY_DUTY_DATES.includes(dateStr)) dayLabel = " (週日)";
+          else if (REGULAR_DUTY_DATES.includes(dateStr) && dayOfWeek !== 6) dayLabel = " (國假)";
+          else if (REGULAR_DUTY_DATES.includes(dateStr) && dayOfWeek === 6) dayLabel = " (週六)";
+
+          const dateText = `${currentMonthIndex + 1}/${i} (${WEEKDAYS[dayOfWeek]})${dayLabel}`;
+          const rowData = [dateText];
+
+          stats.forEach(person => {
+            const isAssigned = dutyInfo && dutyInfo.assignments.some(a => a.id === person.id);
+            if (isAssigned) {
+              const assignmentDetail = dutyInfo.assignments.find(a => a.id === person.id);
+              let cellText = dutyInfo.type !== 'sunday' ? assignmentDetail.group : '✓';
+              if (dutyInfo.earnedPoints > 1) {
+                cellText += ` (+${dutyInfo.earnedPoints})`;
+              }
+              rowData.push(cellText);
+            } else {
+              rowData.push("");
+            }
+          });
+          monthData.push(rowData);
+        }
+
+        const monthSheet = window.XLSX.utils.aoa_to_sheet(monthData);
+        // 調整月份表欄寬
+        const cols = [{wch: 20}]; // 日期欄位
+        stats.forEach(() => cols.push({wch: 15})); // 人員欄位
+        monthSheet['!cols'] = cols;
+
+        window.XLSX.utils.book_append_sheet(wb, monthSheet, `${currentYear}年${currentMonthIndex + 1}月`);
+        currentDate.setMonth(currentDate.getMonth() + 1);
+      }
+
+      window.XLSX.writeFile(wb, `排班表_${config.startDate.replace(/-/g, '')}.xlsx`);
+    } catch (error) {
+      console.error("下載 EXCEL 失敗:", error);
+    } finally {
+      setIsDownloadingExcel(false);
     }
   };
 
@@ -434,8 +586,20 @@ export default function DutyScheduler() {
                                 dutyInfo.type === 'sunday' ? 'text-emerald-700' : 
                                 'text-blue-700'
                               }`}>
+                                {dutyInfo.type !== 'sunday' && <span className="mr-0.5 opacity-70">[{assignee.group}]</span>}
                                 {assignee.name}
-                                {dutyInfo.earnedPoints === 2 && <span className="ml-1 text-[10px] text-red-600 bg-red-100 px-1 rounded shadow-sm border border-red-200" title="連假中斷補償">+2</span>}
+                                {dutyInfo.earnedPoints > 1 && (
+                                  <span 
+                                    className={`ml-1 text-[10px] px-1 rounded shadow-sm border ${
+                                      dutyInfo.isMiddle 
+                                        ? 'text-red-600 bg-red-100 border-red-200' 
+                                        : 'text-orange-600 bg-orange-100 border-orange-200'
+                                    }`} 
+                                    title={dutyInfo.isMiddle ? "連假中斷補償" : "連假頭尾補償"}
+                                  >
+                                    +{dutyInfo.earnedPoints}
+                                  </span>
+                                )}
                               </span>
                             </div>
                           ))}
@@ -486,7 +650,7 @@ export default function DutyScheduler() {
                   <th className="px-4 py-3 font-bold border-r border-slate-200 w-44">日期</th>
                   {stats.map(person => (
                     <th key={person.id} className="px-4 py-3 font-bold text-center border-r border-slate-200 min-w-[80px]">
-                      {person.name}
+                      {person.name} <span className="text-[10px] font-normal text-slate-500 block">({person.group}區)</span>
                     </th>
                   ))}
                 </tr>
@@ -533,18 +697,28 @@ export default function DutyScheduler() {
                       </td>
                       {stats.map(person => {
                         const isAssigned = dutyInfo && dutyInfo.assignments.some(a => a.id === person.id);
+                        const assignmentDetail = isAssigned ? dutyInfo.assignments.find(a => a.id === person.id) : null;
+
                         return (
                           <td key={`${dateStr}-${person.id}`} className="px-4 py-2 border-r border-slate-200/60 text-center">
                             {isAssigned ? (
                               <div className="flex flex-col items-center justify-center gap-1">
-                                <div className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-white shadow-sm ${
+                                <div className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-white shadow-sm font-bold text-[11px] ${
                                   dutyInfo.type === 'holiday' ? 'bg-orange-500' : 
                                   dutyInfo.type === 'sunday' ? 'bg-emerald-600' : 
                                   'bg-blue-600'
                                 }`}>
-                                  <CheckCircle2 className="w-4 h-4" />
+                                  {dutyInfo.type !== 'sunday' ? assignmentDetail.group : <CheckCircle2 className="w-4 h-4" />}
                                 </div>
-                                {dutyInfo.earnedPoints === 2 && <span className="text-[10px] font-bold text-red-600 bg-red-50 px-1.5 rounded border border-red-200 leading-none py-0.5">+2分</span>}
+                                {dutyInfo.earnedPoints > 1 && (
+                                  <span className={`text-[10px] font-bold px-1.5 rounded border leading-none py-0.5 ${
+                                    dutyInfo.isMiddle 
+                                      ? 'text-red-600 bg-red-50 border-red-200' 
+                                      : 'text-orange-600 bg-orange-50 border-orange-200'
+                                  }`}>
+                                    +{dutyInfo.earnedPoints}分
+                                  </span>
+                                )}
                               </div>
                             ) : null}
                           </td>
@@ -582,15 +756,15 @@ export default function DutyScheduler() {
             <h2 className="text-xl font-semibold">排班條件設定</h2>
           </div>
           
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-5">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="space-y-2">
               <label className="text-sm font-medium text-slate-600 flex items-center">
-                <Users className="w-4 h-4 mr-1" /> 參與排班人數
+                <Users className="w-4 h-4 mr-1" /> 參與人數
               </label>
               <input 
                 type="number" 
                 name="numPeople"
-                min="1"
+                min="2"
                 value={config.numPeople} 
                 onChange={handleInputChange}
                 className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
@@ -622,33 +796,37 @@ export default function DutyScheduler() {
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium text-slate-600">常規班起始人員</label>
+              <label className="text-sm font-medium text-slate-600">A區 常規起始人</label>
               <select 
-                name="startRegular" 
-                value={config.startRegular} 
+                name="startRegularA" 
+                value={config.startRegularA} 
                 onChange={handleInputChange}
                 className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white transition-all"
               >
-                {Array.from({ length: config.numPeople }, (_, i) => (
-                  <option key={i} value={i + 1}>
-                    {peopleNames[i]?.trim() ? `${peopleNames[i]}` : `人員 ${i + 1}`}
-                  </option>
+                {peopleConfig.map((p, i) => (
+                  p.group === 'A' && (
+                    <option key={i} value={i + 1}>
+                      {p.name?.trim() ? `${p.name}` : `人員 ${i + 1}`}
+                    </option>
+                  )
                 ))}
               </select>
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium text-slate-600">週日班起始人員</label>
+              <label className="text-sm font-medium text-slate-600">B區 常規起始人</label>
               <select 
-                name="startSunday" 
-                value={config.startSunday} 
+                name="startRegularB" 
+                value={config.startRegularB} 
                 onChange={handleInputChange}
                 className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white transition-all"
               >
-                {Array.from({ length: config.numPeople }, (_, i) => (
-                  <option key={i} value={i + 1}>
-                    {peopleNames[i]?.trim() ? `${peopleNames[i]}` : `人員 ${i + 1}`}
-                  </option>
+                {peopleConfig.map((p, i) => (
+                  p.group === 'B' && (
+                    <option key={i} value={i + 1}>
+                      {p.name?.trim() ? `${p.name}` : `人員 ${i + 1}`}
+                    </option>
+                  )
                 ))}
               </select>
             </div>
@@ -667,22 +845,74 @@ export default function DutyScheduler() {
                 <option value="table">表格</option>
               </select>
             </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-slate-600">連假頭尾積分</label>
+              <input 
+                type="number" 
+                name="edgePoints"
+                min="1"
+                value={config.edgePoints} 
+                onChange={handleInputChange}
+                className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-slate-600">中斷連假積分</label>
+              <input 
+                type="number" 
+                name="middlePoints"
+                min="1"
+                value={config.middlePoints} 
+                onChange={handleInputChange}
+                className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
+              />
+            </div>
           </div>
 
           <div className="mt-6 border-t border-slate-100 pt-4">
-            <label className="text-sm font-medium text-slate-600 mb-3 flex items-center">
-              <Users className="w-4 h-4 mr-1" /> 自訂人員名稱 (若留空則使用預設名稱)
-            </label>
-            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-3">
-              {peopleNames.map((name, index) => (
-                <input
-                  key={index}
-                  type="text"
-                  value={name}
-                  onChange={(e) => handleNameChange(index, e.target.value)}
-                  placeholder={`預設: 人員 ${index + 1}`}
-                  className="w-full px-3 py-2 text-sm rounded-md border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
-                />
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-4 gap-4">
+              <label className="text-sm font-medium text-slate-600 flex items-center">
+                <Users className="w-4 h-4 mr-1" /> 自訂人員名稱與 A/B 工區組別
+              </label>
+              <div className="flex items-center space-x-2 bg-slate-50 px-3 py-1.5 rounded border border-slate-200">
+                <label className="text-sm font-medium text-slate-600">週日班(不分區) 起始人:</label>
+                <select 
+                  name="startSunday" 
+                  value={config.startSunday} 
+                  onChange={handleInputChange}
+                  className="px-2 py-1 text-sm rounded-md border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none bg-white"
+                >
+                  {peopleConfig.map((p, i) => (
+                    <option key={i} value={i + 1}>
+                      {p.name?.trim() ? `${p.name} (${p.group})` : `人員 ${i + 1} (${p.group})`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+              {peopleConfig.map((person, index) => (
+                <div key={index} className="flex bg-white p-1.5 rounded-lg border border-slate-300 focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-500 transition-all shadow-sm">
+                  <input
+                    type="text"
+                    value={person.name}
+                    onChange={(e) => handlePersonChange(index, 'name', e.target.value)}
+                    placeholder={`預設: 人員 ${index + 1}`}
+                    className="w-full px-2 py-1.5 text-sm bg-transparent outline-none"
+                  />
+                  <div className="w-px bg-slate-200 mx-1"></div>
+                  <select
+                    value={person.group}
+                    onChange={(e) => handlePersonChange(index, 'group', e.target.value)}
+                    className="px-1 py-1.5 text-sm font-bold bg-transparent outline-none cursor-pointer text-slate-700 hover:text-blue-600"
+                  >
+                    <option value="A">A區</option>
+                    <option value="B">B區</option>
+                  </select>
+                </div>
               ))}
             </div>
           </div>
@@ -690,9 +920,9 @@ export default function DutyScheduler() {
           <div className="mt-6 flex flex-col lg:flex-row items-center justify-between bg-slate-50 p-4 rounded-lg border border-slate-200">
             <div className="text-sm text-slate-600 space-y-1 mb-4 lg:mb-0">
               <p className="flex items-center text-red-600 font-medium"><CheckCircle2 className="w-4 h-4 mr-2" />嚴格排除：農曆春節期間</p>
-              <p className="flex items-center text-blue-600 font-medium"><CheckCircle2 className="w-4 h-4 mr-2" />常規排班：週六、連假與國定假日 (2人)</p>
-              <p className="flex items-center text-emerald-600 font-medium"><CheckCircle2 className="w-4 h-4 mr-2" />週日排班：所有非春節週日 (獨立計算)</p>
-              <p className="flex items-center text-purple-600 font-medium"><CheckCircle2 className="w-4 h-4 mr-2" />相鄰防呆：相鄰排班日強制不重複，並優先將中斷連假(+2分)平均分配</p>
+              <p className="flex items-center text-blue-600 font-medium"><CheckCircle2 className="w-4 h-4 mr-2" />常規排班：週六、連假與國定假日 (A、B工區各派1人)</p>
+              <p className="flex items-center text-emerald-600 font-medium"><CheckCircle2 className="w-4 h-4 mr-2" />週日排班：所有非春節週日 (單人不分區，獨立計算)</p>
+              <p className="flex items-center text-purple-600 font-medium"><CheckCircle2 className="w-4 h-4 mr-2" />相鄰防呆：相鄰排班日強制不重複，並優先將中斷連假(+{config.middlePoints}分)平均分配</p>
               <p className="flex items-center text-amber-600 font-medium"><CheckCircle2 className="w-4 h-4 mr-2" />單月防呆：強制將同月班次平均攤平，避免單月集中排班過多次</p>
             </div>
             <button 
@@ -707,7 +937,19 @@ export default function DutyScheduler() {
         {hasGenerated && (
           <div className="mt-8 space-y-4">
             
-            <div className="flex justify-end mb-2">
+            <div className="flex flex-wrap justify-end gap-3 mb-2">
+              <button 
+                onClick={downloadAsExcel} 
+                disabled={isDownloadingExcel}
+                className="flex items-center px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-bold rounded-lg transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isDownloadingExcel ? (
+                  <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                ) : (
+                  <FileSpreadsheet className="w-5 h-5 mr-2" />
+                )}
+                {isDownloadingExcel ? '處理中...' : '下載 EXCEL (表格)'}
+              </button>
               <button 
                 onClick={downloadAsImage} 
                 disabled={isDownloading}
@@ -718,7 +960,7 @@ export default function DutyScheduler() {
                 ) : (
                   <Download className="w-5 h-5 mr-2" />
                 )}
-                {isDownloading ? '圖片生成中...' : '下載排班表與統計圖'}
+                {isDownloading ? '圖片生成中...' : '下載圖片 (完整版面)'}
               </button>
             </div>
 
@@ -726,6 +968,53 @@ export default function DutyScheduler() {
               
               <div className="w-full">
                 {config.viewMode === 'table' ? renderTableView() : renderCalendars()}
+              </div>
+
+              {/* 新增：累積積分總覽表 */}
+              <div className="w-full bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                <div className="bg-slate-50 border-b border-slate-200 p-4">
+                  <h2 className="text-lg font-bold flex items-center text-slate-800">
+                    <TableIcon className="w-5 h-5 mr-2 text-slate-600" />
+                    累積積分總覽表
+                  </h2>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm text-left border-collapse">
+                    <thead className="bg-slate-100 text-slate-700 border-b border-slate-200">
+                      <tr>
+                        <th className="px-4 py-3 font-bold border-r border-slate-200 w-32">人員</th>
+                        <th className="px-4 py-3 font-bold border-r border-slate-200 text-center w-24">組別</th>
+                        <th className="px-4 py-3 font-bold border-r border-slate-200 text-center">常規班積分</th>
+                        <th className="px-4 py-3 font-bold border-r border-slate-200 text-center">週日班積分</th>
+                        <th className="px-4 py-3 font-bold text-center">總積分</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {stats.map(person => (
+                        <tr key={`summary-${person.id}`} className="bg-white border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                          <td className="px-4 py-2 border-r border-slate-200/60 font-medium text-slate-800 flex items-center gap-2">
+                            <div className="w-6 h-6 rounded-full bg-slate-800 text-white flex items-center justify-center font-bold text-xs shrink-0">
+                              {person.id}
+                            </div>
+                            <span className="truncate font-bold">{person.name}</span>
+                          </td>
+                          <td className="px-4 py-2 border-r border-slate-200/60 text-center font-bold text-slate-600">
+                            {person.group}區
+                          </td>
+                          <td className="px-4 py-2 border-r border-slate-200/60 text-center text-blue-600 font-bold text-base">
+                            {person.regularPoints}
+                          </td>
+                          <td className="px-4 py-2 border-r border-slate-200/60 text-center text-emerald-600 font-bold text-base">
+                            {person.sundayPoints}
+                          </td>
+                          <td className="px-4 py-2 text-center text-slate-900 font-black text-lg bg-slate-50/50">
+                            {person.regularPoints + person.sundayPoints}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
 
               <div className="w-full bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
@@ -743,10 +1032,11 @@ export default function DutyScheduler() {
                           {person.id}
                         </div>
                         <div className="flex flex-col">
-                          <span className="font-bold text-slate-700 text-sm">{person.name}</span>
-                          {/* 針對 +2 分天數的精準標記 */}
-                          <span className="text-[11px] font-bold text-red-500 bg-red-50 border border-red-100 px-1.5 py-0.5 rounded-sm mt-0.5 inline-block">
-                            中斷連假 (+2分): {person.interruptedLwCount} 次
+                          <span className="font-bold text-slate-700 text-sm">
+                            {person.name} <span className="text-slate-400 font-normal text-xs ml-0.5">({person.group}區)</span>
+                          </span>
+                          <span className="text-[11px] font-bold text-red-500 bg-red-50 border border-red-100 px-1.5 py-0.5 rounded-sm mt-0.5 inline-block w-fit">
+                            中斷連假 (+{config.middlePoints}分): {person.interruptedLwCount} 次
                           </span>
                         </div>
                       </div>
@@ -757,16 +1047,17 @@ export default function DutyScheduler() {
                           <div className="text-xl font-black text-blue-600 mb-2 leading-none">{person.regularPoints}</div>
                           <div className="w-full flex flex-col items-center justify-end">
                             {person.regularDates.slice().reverse().map((dateStr, idx) => {
-                              const pts = DUTY_POINTS_MAP[dateStr] || 1;
+                              const meta = dutyMetaMap[dateStr] || {points: 1, isMiddle: false, isEdge: false};
+                              const pts = meta.points;
                               const baseH = 28; 
                               const gap = 4; 
-                              const height = pts === 2 ? (baseH * 2 + gap) : baseH; 
+                              const height = pts > 1 ? (baseH * pts + gap * (pts - 1)) : baseH; 
                               return (
                                 <div key={`reg-${idx}`} 
                                      className="w-full max-w-[80px] bg-blue-50 border border-blue-200 text-blue-700 flex flex-col items-center justify-center rounded-md shadow-sm hover:bg-blue-100 transition-colors mb-1"
                                      style={{ height: `${height}px` }}>
                                   <span className="text-[11px] font-semibold">{dateStr.substring(5).replace('-', '/')}</span>
-                                  {pts === 2 && <span className="text-red-500 font-bold ml-0.5 text-[10px] leading-none mt-0.5">+2</span>}
+                                  {pts > 1 && <span className={`font-bold ml-0.5 text-[10px] leading-none mt-0.5 ${meta.isMiddle ? 'text-red-500' : 'text-orange-500'}`}>+{pts}</span>}
                                 </div>
                               );
                             })}
@@ -780,16 +1071,17 @@ export default function DutyScheduler() {
                           <div className="text-xl font-black text-emerald-600 mb-2 leading-none">{person.sundayPoints}</div>
                           <div className="w-full flex flex-col items-center justify-end">
                             {person.sundayDates.slice().reverse().map((dateStr, idx) => {
-                              const pts = DUTY_POINTS_MAP[dateStr] || 1;
+                              const meta = dutyMetaMap[dateStr] || {points: 1, isMiddle: false, isEdge: false};
+                              const pts = meta.points;
                               const baseH = 28;
                               const gap = 4;
-                              const height = pts === 2 ? (baseH * 2 + gap) : baseH;
+                              const height = pts > 1 ? (baseH * pts + gap * (pts - 1)) : baseH;
                               return (
                                 <div key={`sun-${idx}`} 
                                      className="w-full max-w-[80px] bg-emerald-50 border border-emerald-200 text-emerald-700 flex flex-col items-center justify-center rounded-md shadow-sm hover:bg-emerald-100 transition-colors mb-1"
                                      style={{ height: `${height}px` }}>
                                   <span className="text-[11px] font-semibold">{dateStr.substring(5).replace('-', '/')}</span>
-                                  {pts === 2 && <span className="text-red-500 font-bold ml-0.5 text-[10px] leading-none mt-0.5">+2</span>}
+                                  {pts > 1 && <span className={`font-bold ml-0.5 text-[10px] leading-none mt-0.5 ${meta.isMiddle ? 'text-red-500' : 'text-orange-500'}`}>+{pts}</span>}
                                 </div>
                               );
                             })}
